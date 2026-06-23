@@ -1,0 +1,20 @@
+# build artifacts
+/durakv
+/test_storage
+/test_wal_recovery
+/test_bufferpool
+/test_belady
+/demo_race
+/demo_deadlock
+/demo_scheduler
+/loadtest
+*.o
+*.dSYM/
+
+# runtime data files
+*.db
+*.log
+*.snap
+
+# macOS
+.DS_Store
