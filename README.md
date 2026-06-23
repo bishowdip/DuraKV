@@ -4,11 +4,10 @@ A crash-safe, multi-client key–value store in C. **DuraKV never corrupts or
 loses committed data even when the process is killed mid-write** (`kill -9` /
 power loss), proven by crash-injection tests.
 
-This repo is built in phases (see `DuraKV_PROJECT_SPEC.md` §12). **Phases 1–3
-are complete**: the durable spine (storage + write-ahead log + crash
-recovery), the buffer pool (paging with FIFO/LRU eviction), and concurrency
-(thread pool, round-robin scheduler, a thread-safe store). No network or crypto
-yet (Phases 4–5); the only dependency so far is **pthreads** (in libc).
+It is built in layers: the durable spine (storage + write-ahead log + crash
+recovery), a buffer pool (paging with FIFO/LRU eviction), and concurrency
+(thread pool, round-robin scheduler, a thread-safe store). The only dependency
+so far is **pthreads** (in libc).
 
 ## Build & run
 
@@ -159,9 +158,6 @@ include/  storage.h wal.h recovery.h bufferpool.h replacement.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
           threadpool.c scheduler.c durakv.c
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
-          demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
+          mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
 scripts/  crashtest.sh
 ```
-
-See `DuraKV_PROJECT_SPEC.md` for the full design and the remaining phases
-(network, security).
