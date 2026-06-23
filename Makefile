@@ -17,7 +17,7 @@ durakv: $(CORE) src/durakv.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- unit tests ----------------------------------------------------------
-tests: test_storage test_wal_recovery test_bufferpool test_belady \
+tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
        demo_race demo_deadlock demo_scheduler loadtest
 
 test_storage: $(CORE) tests/test_storage.c
@@ -31,6 +31,10 @@ test_bufferpool: $(CORE) tests/test_bufferpool.c
 
 test_belady: $(CORE) tests/test_belady.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# --- standalone concept demos --------------------------------------------
+mem_demo: tests/mem_demo.c
+	$(CC) $(CFLAGS) -o $@ $^
 
 # --- concurrency demos ---------------------------------------------------
 demo_race: $(CORE) tests/demo_race.c
@@ -50,6 +54,7 @@ test: tests
 	@echo "== test_wal_recovery ==" && ./test_wal_recovery
 	@echo "== test_bufferpool =="   && ./test_bufferpool
 	@echo "== test_belady =="       && ./test_belady
+	@echo "== mem_demo =="          && ./mem_demo
 	@echo "== demo_race =="         && ./demo_race
 	@echo "== demo_deadlock =="     && ./demo_deadlock
 	@echo "== demo_scheduler =="    && ./demo_scheduler
@@ -63,6 +68,6 @@ crashtest_concurrent: durakv
 
 clean:
 	rm -f durakv test_storage test_wal_recovery test_bufferpool test_belady
-	rm -f demo_race demo_deadlock demo_scheduler loadtest
+	rm -f mem_demo demo_race demo_deadlock demo_scheduler loadtest
 	rm -f *.db *.log /tmp/durakv_*.db /tmp/durakv_*.log /tmp/durakv_*.snap
 	rm -rf *.dSYM
