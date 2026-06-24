@@ -26,7 +26,7 @@ durakv-client: $(NET) src/client.c
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
-       demo_race demo_deadlock demo_scheduler loadtest
+       demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -39,6 +39,13 @@ test_bufferpool: $(CORE) tests/test_bufferpool.c
 
 test_belady: $(CORE) tests/test_belady.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# --- network/IPC tests ---------------------------------------------------
+test_ipc: $(CORE) $(NET) src/server.c tests/test_ipc.c
+	$(CC) $(CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS)
+
+demo_mqueue: tests/demo_mqueue.c
+	$(CC) $(CFLAGS) -o $@ $^
 
 # --- standalone concept demos --------------------------------------------
 mem_demo: tests/mem_demo.c
@@ -67,6 +74,8 @@ test: tests
 	@echo "== demo_deadlock =="     && ./demo_deadlock
 	@echo "== demo_scheduler =="    && ./demo_scheduler
 	@echo "== loadtest =="          && ./loadtest
+	@echo "== demo_mqueue =="       && ./demo_mqueue
+	@echo "== test_ipc =="          && ./test_ipc
 
 crashtest: durakv
 	./scripts/crashtest.sh
