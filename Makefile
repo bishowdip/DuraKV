@@ -32,7 +32,7 @@ durakv-client: $(NET) src/client.c
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
        demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
-       file_demo demo_crypto demo_audit
+       file_demo demo_crypto demo_audit demo_auth
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -67,6 +67,9 @@ demo_crypto: src/crypto.c tests/demo_crypto.c
 demo_audit: src/audit.c tests/demo_audit.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
 
+demo_auth: src/crypto.c src/auth.c src/permissions.c tests/demo_auth.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
+
 # --- concurrency demos ---------------------------------------------------
 demo_race: $(CORE) tests/demo_race.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -95,6 +98,7 @@ test: tests
 	@echo "== file_demo =="         && ./file_demo
 	@echo "== demo_crypto =="       && ./demo_crypto
 	@echo "== demo_audit =="        && ./demo_audit
+	@echo "== demo_auth =="         && ./demo_auth
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -106,6 +110,6 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady
 	rm -f mem_demo demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
-	rm -f file_demo demo_crypto demo_audit
+	rm -f file_demo demo_crypto demo_audit demo_auth
 	rm -f *.db *.log *.sock /tmp/durakv_*.db /tmp/durakv_*.log /tmp/durakv_*.snap /tmp/durakv_*.sock
 	rm -rf *.dSYM
