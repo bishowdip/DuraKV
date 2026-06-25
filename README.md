@@ -164,6 +164,33 @@ cannot do. (System V IPC is used because macOS does not implement POSIX
 | `tests/test_ipc.c` | 8 concurrent clients × 50 ops over AF_UNIX, framed responses verified |
 | `tests/demo_mqueue.c` | inter-process message sharing via a System V message queue |
 
+## Security (Phase 5)
+
+Built on **libsodium** (`brew install libsodium`); the security demos link it,
+while the core engine stays dependency-free.
+
+- **File permissions** (`tests/file_demo.c`) — the POSIX model directly:
+  `open`/`creat` with a mode, `chmod` to change rwx, `access()` to query, and
+  the kernel refusing a write to a `0444` file.
+- **Encryption** (`src/crypto.c`) — XChaCha20-Poly1305 AEAD (chosen over
+  AES-GCM: no hardware-AES needed, and a 192-bit nonce makes random nonces
+  safe). The demo shows ciphertext (no plaintext visible) and that flipping one
+  byte makes decryption **fail** — confidentiality *and* integrity.
+- **Authentication** (`src/auth.c`) — passwords stored as **Argon2id** hashes
+  (memory-hard); wrong passwords rejected.
+- **Permissions** (`src/permissions.c`) — owner/group/other **rwx** on key
+  namespaces, exactly like Unix file bits.
+- **Audit** (`src/audit.c`) — append-only, **hash-chained** log
+  (`hash = SHA-256(prev || entry)`); editing any past entry breaks the chain,
+  which `audit_verify()` detects and pinpoints.
+
+| Test | Proves |
+|------|--------|
+| `tests/file_demo.c` | POSIX create / chmod / access; write to read-only file denied |
+| `tests/demo_crypto.c` | AEAD confidentiality + integrity; Argon2id password auth |
+| `tests/demo_audit.c` | hash-chained audit detects a one-byte tamper |
+| `tests/demo_auth.c` | Argon2 login + namespace rwx allow/deny across users |
+
 ## Tests
 
 | Test | Proves |
@@ -196,10 +223,15 @@ crashtest: PASS -- 1047 committed keys survived 12 kill -9 cycles
 ```
 include/  storage.h wal.h recovery.h bufferpool.h replacement.h
           threadpool.h scheduler.h protocol.h server.h
+          crypto.h auth.h permissions.h audit.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
           threadpool.c scheduler.c protocol.c server.c client.c durakv.c
+          crypto.c auth.c permissions.c audit.c
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
           mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
-          demo_mqueue.c test_ipc.c
+          demo_mqueue.c test_ipc.c file_demo.c
+          demo_crypto.c demo_audit.c demo_auth.c
 scripts/  crashtest.sh
 ```
+
+Build the security demos (need libsodium): `make demo_crypto demo_audit demo_auth`.
