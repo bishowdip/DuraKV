@@ -47,6 +47,27 @@ OK
 VALUE kathmandu
 ```
 
+### Client / server (IPC)
+
+The same store is reachable by multiple concurrent clients over a **Unix
+domain socket** (`AF_UNIX`) — local IPC, deliberately *not* TCP/IP:
+
+```bash
+./durakv-server /tmp/durakv.sock data.db wal.log 4   # 4 worker threads
+./durakv-client /tmp/durakv.sock                     # interactive client
+```
+
+Wire commands: `PING`, `SET <key> <value>`, `GET <key>`, `DEL <key>`,
+`STATS`, `QUIT`. Each message is a length-prefixed frame
+(`[4-byte big-endian length][payload]`).
+
+```
+$ printf 'SET city kathmandu\nGET city\nQUIT\n' | ./durakv-client /tmp/durakv.sock
+OK
+OK kathmandu
+BYE
+```
+
 ## How durability works
 
 Three concepts carry Phase 1:
@@ -123,6 +144,26 @@ Throughput is **fsync-bound**: each commit does a full `F_FULLFSYNC` under the
 write lock, so commits serialise at a few ms each (group commit would be the
 fix). That is the price of durability, paid deliberately.
 
+## Network & IPC (Phase 4)
+
+Clients reach the store over a **Unix domain socket** (`AF_UNIX`) rather than
+TCP/IP — the right tool for local inter-process communication (no network
+stack, access controlled by filesystem permissions, lower overhead). The
+server (`src/server.c`) accepts connections and hands each to the thread pool,
+so many clients are served at once; messages use length-prefixed framing
+(`src/protocol.c`).
+
+For pure **message passing**, `tests/demo_mqueue.c` shows a System V message
+queue shared between a parent and child process, including type-selective
+receive (pull a priority message ahead of FIFO ones) — something a byte stream
+cannot do. (System V IPC is used because macOS does not implement POSIX
+`mq_*`.)
+
+| Test | Proves |
+|------|--------|
+| `tests/test_ipc.c` | 8 concurrent clients × 50 ops over AF_UNIX, framed responses verified |
+| `tests/demo_mqueue.c` | inter-process message sharing via a System V message queue |
+
 ## Tests
 
 | Test | Proves |
@@ -150,14 +191,15 @@ iter  1: acked +25   total=25     missing=0
 crashtest: PASS -- 1047 committed keys survived 12 kill -9 cycles
 ```
 
-## Layout (Phases 1–3)
+## Layout
 
 ```
 include/  storage.h wal.h recovery.h bufferpool.h replacement.h
-          threadpool.h scheduler.h
+          threadpool.h scheduler.h protocol.h server.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
-          threadpool.c scheduler.c durakv.c
+          threadpool.c scheduler.c protocol.c server.c client.c durakv.c
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
           mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
+          demo_mqueue.c test_ipc.c
 scripts/  crashtest.sh
 ```
