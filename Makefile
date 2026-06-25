@@ -10,6 +10,11 @@ CORE    := src/storage.c src/wal.c src/recovery.c \
            src/threadpool.c src/scheduler.c
 NET     := src/protocol.c
 
+# libsodium (security layer only) -- located via Homebrew, fallback /usr/local
+SODIUM_PREFIX ?= $(shell brew --prefix libsodium 2>/dev/null || echo /usr/local)
+SODIUM_CFLAGS := -I$(SODIUM_PREFIX)/include
+SODIUM_LIBS   := -L$(SODIUM_PREFIX)/lib -lsodium
+
 .PHONY: all tests test demos crashtest crashtest_concurrent clean
 
 all: durakv durakv-server durakv-client
@@ -27,7 +32,7 @@ durakv-client: $(NET) src/client.c
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
        demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
-       file_demo
+       file_demo demo_crypto
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -55,6 +60,10 @@ mem_demo: tests/mem_demo.c
 file_demo: tests/file_demo.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+# --- security demos (need libsodium) -------------------------------------
+demo_crypto: src/crypto.c tests/demo_crypto.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
+
 # --- concurrency demos ---------------------------------------------------
 demo_race: $(CORE) tests/demo_race.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -81,6 +90,7 @@ test: tests
 	@echo "== demo_mqueue =="       && ./demo_mqueue
 	@echo "== test_ipc =="          && ./test_ipc
 	@echo "== file_demo =="         && ./file_demo
+	@echo "== demo_crypto =="       && ./demo_crypto
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -92,5 +102,6 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady
 	rm -f mem_demo demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
+	rm -f file_demo demo_crypto
 	rm -f *.db *.log *.sock /tmp/durakv_*.db /tmp/durakv_*.log /tmp/durakv_*.snap /tmp/durakv_*.sock
 	rm -rf *.dSYM
