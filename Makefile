@@ -9,6 +9,7 @@ CORE    := src/storage.c src/wal.c src/recovery.c \
            src/bufferpool.c src/replacement.c \
            src/threadpool.c src/scheduler.c
 NET     := src/protocol.c
+SEC     := src/crypto.c src/auth.c src/permissions.c src/audit.c
 
 # libsodium (security layer only) -- located via Homebrew, fallback /usr/local
 SODIUM_PREFIX ?= $(shell brew --prefix libsodium 2>/dev/null || echo /usr/local)
@@ -23,8 +24,8 @@ durakv: $(CORE) src/durakv.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- network/IPC binaries (AF_UNIX) --------------------------------------
-durakv-server: $(CORE) $(NET) src/server.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+durakv-server: $(CORE) $(NET) $(SEC) src/server.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 durakv-client: $(NET) src/client.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -32,7 +33,7 @@ durakv-client: $(NET) src/client.c
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
        demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
-       file_demo demo_crypto demo_audit demo_auth
+       file_demo demo_crypto demo_audit demo_auth test_secure
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -47,8 +48,11 @@ test_belady: $(CORE) tests/test_belady.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- network/IPC tests ---------------------------------------------------
-test_ipc: $(CORE) $(NET) src/server.c tests/test_ipc.c
-	$(CC) $(CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS)
+test_ipc: $(CORE) $(NET) $(SEC) src/server.c tests/test_ipc.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
+
+test_secure: $(CORE) $(NET) $(SEC) src/server.c tests/test_secure.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 demo_mqueue: tests/demo_mqueue.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -99,6 +103,7 @@ test: tests
 	@echo "== demo_crypto =="       && ./demo_crypto
 	@echo "== demo_audit =="        && ./demo_audit
 	@echo "== demo_auth =="         && ./demo_auth
+	@echo "== test_secure =="       && ./test_secure
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -110,6 +115,7 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady
 	rm -f mem_demo demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
-	rm -f file_demo demo_crypto demo_audit demo_auth
+	rm -f file_demo demo_crypto demo_audit demo_auth test_secure
+	rm -f *.audit
 	rm -f *.db *.log *.sock /tmp/durakv_*.db /tmp/durakv_*.log /tmp/durakv_*.snap /tmp/durakv_*.sock
 	rm -rf *.dSYM
