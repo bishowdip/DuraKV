@@ -17,6 +17,20 @@ static int committed(const uint64_t *set, size_t n, uint64_t txn)
     return 0;
 }
 
+/* Recover a PAGE_SIZE plaintext image from a WAL image that may be sealed.
+ * Returns 1 on success (img filled), 0 if it cannot be used (wrong key/corrupt
+ * or unexpected length). */
+static int wal_image(DB *db, const uint8_t *src, uint32_t len, uint8_t *img)
+{
+    if (db->codec) {
+        long m = db->codec->open(db->codec->ctx, src, len, img);
+        return m == (long)PAGE_SIZE;
+    }
+    if (len != PAGE_SIZE) return 0;
+    memcpy(img, src, PAGE_SIZE);
+    return 1;
+}
+
 int recovery_run(DB *db)
 {
     WalRecord *recs;
@@ -43,15 +57,17 @@ int recovery_run(DB *db)
     }
 
     uint8_t page[PAGE_SIZE];
+    uint8_t img[PAGE_SIZE];
 
     /* ---- Redo: re-apply committed after-images, idempotently ----------- */
     for (size_t i = start; i < n; i++) {
         WalRecord *r = &recs[i];
         if (r->type != WAL_UPDATE) continue;
         if (!committed(commit_set, ncommit, r->txn_id)) continue;
+        if (!wal_image(db, r->after, r->after_len, img)) continue;   /* wrong key */
         page_read(db, r->page_id, page);
         if (page_get_lsn(page) < r->lsn) {       /* the idempotency check */
-            memcpy(page, r->after, r->after_len);
+            memcpy(page, img, PAGE_SIZE);
             page_write(db, r->page_id, page);
         }
     }
@@ -62,8 +78,9 @@ int recovery_run(DB *db)
         if (r->type != WAL_UPDATE) continue;
         if (committed(commit_set, ncommit, r->txn_id)) continue;
         if (r->page_id >= db->page_count) continue;   /* never materialised */
+        if (!wal_image(db, r->before, r->before_len, img)) continue;
         page_read(db, r->page_id, page);
-        memcpy(page, r->before, r->before_len);
+        memcpy(page, img, PAGE_SIZE);
         page_write(db, r->page_id, page);
     }
 

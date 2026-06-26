@@ -61,6 +61,23 @@ typedef struct {
     size_t     count;
 } Dir;
 
+/* ---- optional encryption-at-rest codec --------------------------------- *
+ * A pluggable AEAD codec. When a DB has one, every page written to data.db and
+ * every page image logged to the WAL is sealed; reads/recovery unseal. The
+ * implementation (src/encryption.c) is the only place that touches libsodium,
+ * so storage.c / recovery.c stay dependency-free -- they only call through
+ * these function pointers. */
+#define DURAKV_SALT_LEN 16
+
+typedef struct PageCodec {
+    void   *ctx;                                   /* holds the derived key   */
+    long  (*seal)(void *ctx, const uint8_t *plain, size_t plen, uint8_t *out);
+    long  (*open)(void *ctx, const uint8_t *in, size_t inlen, uint8_t *plain);
+    size_t  overhead;                              /* bytes seal adds         */
+    void  (*free_ctx)(void *ctx);
+    uint8_t salt[DURAKV_SALT_LEN];                 /* stored plaintext in hdr */
+} PageCodec;
+
 /* ---- the database handle ----------------------------------------------- */
 
 struct BufferPool;              /* defined in bufferpool.h                   */
@@ -76,6 +93,8 @@ typedef struct DB {
     size_t    page_free_cap;    /* capacity of page_free[]                   */
     struct BufferPool *bp;      /* page cache (NULL during recovery)         */
     pthread_rwlock_t lock;      /* many concurrent readers, exclusive writers*/
+    PageCodec *codec;           /* encryption-at-rest (NULL => plaintext)    */
+    size_t    phys_page;        /* on-disk page slot size (PAGE_SIZE + ovhd) */
 } DB;
 
 /* ---- return codes ------------------------------------------------------ */
@@ -90,11 +109,23 @@ enum {
 /* ---- public key/value API ---------------------------------------------- */
 
 /* Open (or create) the store, run crash recovery, and return a handle.
- * db_open uses sensible defaults; db_open_ex configures the buffer pool. */
+ * db_open uses sensible defaults; db_open_ex configures the buffer pool;
+ * db_open_full additionally attaches an encryption codec (NULL => plaintext)
+ * and takes ownership of it. db_open_secure (src/encryption.c) derives a key
+ * from a password and calls db_open_full. */
 DB  *db_open(const char *data_path, const char *wal_path);
 DB  *db_open_ex(const char *data_path, const char *wal_path,
                 size_t nframes, PolicyKind policy);
+DB  *db_open_full(const char *data_path, const char *wal_path,
+                  size_t nframes, PolicyKind policy, PageCodec *codec);
+DB  *db_open_secure(const char *data_path, const char *wal_path,
+                    size_t nframes, PolicyKind policy, const char *password);
 void db_close(DB *db);
+
+/* Peek a data file's header without a full open: reports whether it is new
+ * (absent/empty), whether it is encrypted, and its KDF salt. */
+int  storage_peek(const char *data_path, int *is_new, uint8_t salt[DURAKV_SALT_LEN],
+                  int *encrypted);
 
 int  db_set(DB *db, const char *key, const void *val, uint32_t vlen);
 /* Copies up to buflen bytes of the value into valbuf; *vlen_out gets the

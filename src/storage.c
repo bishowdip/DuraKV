@@ -107,20 +107,35 @@ void record_parse(const uint8_t *rec, const char **key, uint16_t *klen,
 /* Raw page I/O                                                           */
 /* ====================================================================== */
 
+#define PAGE_SLOT_MAX (PAGE_SIZE + 64)   /* logical page + room for AEAD overhead */
+
 int page_read(DB *db, uint64_t page_id, uint8_t *buf)
 {
-    ssize_t n = pread(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
-    if (n < (ssize_t)PAGE_SIZE) {
-        /* hole or past EOF -> hand back a valid empty page */
-        page_init(buf, page_id);
+    if (!db->codec) {                              /* plaintext */
+        ssize_t n = pread(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
+        if (n < (ssize_t)PAGE_SIZE) page_init(buf, page_id);   /* hole/EOF -> empty */
+        return DK_OK;
     }
+    uint8_t blob[PAGE_SLOT_MAX];                   /* encrypted: read + unseal */
+    ssize_t n = pread(db->data_fd, blob, db->phys_page, (off_t)page_id * db->phys_page);
+    if (n < (ssize_t)db->phys_page) { page_init(buf, page_id); return DK_OK; }
+    long m = db->codec->open(db->codec->ctx, blob, db->phys_page, buf);
+    if (m != (long)PAGE_SIZE) page_init(buf, page_id);   /* wrong key / corrupt */
     return DK_OK;
 }
 
 int page_write(DB *db, uint64_t page_id, const uint8_t *buf)
 {
-    ssize_t n = pwrite(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
-    if (n != (ssize_t)PAGE_SIZE) return DK_IO;
+    if (!db->codec) {                              /* plaintext */
+        ssize_t n = pwrite(db->data_fd, buf, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
+        if (n != (ssize_t)PAGE_SIZE) return DK_IO;
+        if (page_id + 1 > db->page_count) db->page_count = page_id + 1;
+        return DK_OK;
+    }
+    uint8_t blob[PAGE_SLOT_MAX];                   /* encrypted: seal + write */
+    long sl = db->codec->seal(db->codec->ctx, buf, PAGE_SIZE, blob);
+    ssize_t n = pwrite(db->data_fd, blob, (size_t)sl, (off_t)page_id * db->phys_page);
+    if (n != sl) return DK_IO;
     if (page_id + 1 > db->page_count) db->page_count = page_id + 1;
     return DK_OK;
 }
@@ -278,9 +293,18 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
         /* stamp the after-image with the LSN this UPDATE will receive, so
          * recovery's page_lsn comparison is exact and idempotent. */
         page_set_lsn(mods[i].after, db->next_lsn);
-        prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
-                          mods[i].before, PAGE_SIZE,
-                          mods[i].after,  PAGE_SIZE);
+        if (db->codec) {
+            /* seal the page images so the WAL leaks no plaintext either */
+            uint8_t sb[PAGE_SLOT_MAX], sa[PAGE_SLOT_MAX];
+            long lb = db->codec->seal(db->codec->ctx, mods[i].before, PAGE_SIZE, sb);
+            long la = db->codec->seal(db->codec->ctx, mods[i].after,  PAGE_SIZE, sa);
+            prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
+                              sb, (uint32_t)lb, sa, (uint32_t)la);
+        } else {
+            prev = wal_append(db, WAL_UPDATE, txn, prev, mods[i].page_id,
+                              mods[i].before, PAGE_SIZE,
+                              mods[i].after,  PAGE_SIZE);
+        }
     }
     wal_append(db, WAL_COMMIT, txn, prev, 0, NULL, 0, NULL, 0);
 
@@ -454,6 +478,27 @@ static void rebuild_index(DB *db)
     }
 }
 
+int storage_peek(const char *data_path, int *is_new, uint8_t salt[DURAKV_SALT_LEN],
+                 int *encrypted)
+{
+    *is_new = 0; *encrypted = 0;
+    if (salt) memset(salt, 0, DURAKV_SALT_LEN);
+
+    int fd = open(data_path, O_RDONLY);
+    if (fd < 0) { *is_new = 1; return 0; }
+    off_t sz = lseek(fd, 0, SEEK_END);
+    if (sz == 0) { *is_new = 1; close(fd); return 0; }
+
+    uint8_t hdr[64];
+    if (pread(fd, hdr, sizeof(hdr), 0) == (ssize_t)sizeof(hdr)) {
+        uint32_t enc; memcpy(&enc, hdr + 16, 4);
+        *encrypted = enc ? 1 : 0;
+        if (salt) memcpy(salt, hdr + 20, DURAKV_SALT_LEN);
+    }
+    close(fd);
+    return 0;
+}
+
 DB *db_open(const char *data_path, const char *wal_path)
 {
     return db_open_ex(data_path, wal_path, 64, POLICY_LRU);
@@ -462,28 +507,43 @@ DB *db_open(const char *data_path, const char *wal_path)
 DB *db_open_ex(const char *data_path, const char *wal_path,
                size_t nframes, PolicyKind policy)
 {
+    return db_open_full(data_path, wal_path, nframes, policy, NULL);
+}
+
+DB *db_open_full(const char *data_path, const char *wal_path,
+                 size_t nframes, PolicyKind policy, PageCodec *codec)
+{
     DB *db = calloc(1, sizeof(*db));
     if (!db) return NULL;
+
+    db->codec     = codec;
+    db->phys_page = PAGE_SIZE + (codec ? codec->overhead : 0);
 
     db->data_fd = open(data_path, O_RDWR | O_CREAT, 0600);
     if (db->data_fd < 0) { perror("open data"); free(db); return NULL; }
 
     off_t sz = lseek(db->data_fd, 0, SEEK_END);
     if (sz == 0) {
-        /* fresh store: write the immutable header page 0 */
-        uint8_t p0[PAGE_SIZE];
-        memset(p0, 0, PAGE_SIZE);
+        /* fresh store: write the header page 0 (one physical slot, plaintext
+         * even when encrypted -- it carries the KDF salt readable before key) */
+        uint8_t p0[PAGE_SLOT_MAX];
+        memset(p0, 0, db->phys_page);
         memcpy(p0, DURAKV_MAGIC, 8);
         uint32_t ver = DURAKV_VERSION, ps = PAGE_SIZE;
         memcpy(p0 + 8, &ver, 4);
         memcpy(p0 + 12, &ps, 4);
-        if (pwrite(db->data_fd, p0, PAGE_SIZE, 0) != PAGE_SIZE) {
+        if (codec) {
+            uint32_t enc = 1;
+            memcpy(p0 + 16, &enc, 4);
+            memcpy(p0 + 20, codec->salt, DURAKV_SALT_LEN);
+        }
+        if (pwrite(db->data_fd, p0, db->phys_page, 0) != (ssize_t)db->phys_page) {
             perror("init header"); close(db->data_fd); free(db); return NULL;
         }
         fsync(db->data_fd);
         db->page_count = 1;
     } else {
-        db->page_count = (uint64_t)(sz / PAGE_SIZE);
+        db->page_count = (uint64_t)(sz / db->phys_page);
         if (db->page_count == 0) db->page_count = 1;
     }
 
@@ -518,5 +578,9 @@ void db_close(DB *db)
     free(db->page_free);
     close(db->data_fd);
     close(db->wal_fd);
+    if (db->codec) {
+        if (db->codec->free_ctx) db->codec->free_ctx(db->codec->ctx);
+        free(db->codec);
+    }
     free(db);
 }
