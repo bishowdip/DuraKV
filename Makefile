@@ -10,6 +10,7 @@ CORE    := src/storage.c src/wal.c src/recovery.c \
            src/threadpool.c src/scheduler.c
 NET     := src/protocol.c
 SEC     := src/crypto.c src/auth.c src/permissions.c src/audit.c
+ENCSRC  := src/crypto.c src/encryption.c          # encryption-at-rest codec
 
 # libsodium (security layer only) -- located via Homebrew, fallback /usr/local
 SODIUM_PREFIX ?= $(shell brew --prefix libsodium 2>/dev/null || echo /usr/local)
@@ -20,11 +21,11 @@ SODIUM_LIBS   := -L$(SODIUM_PREFIX)/lib -lsodium
 
 all: durakv durakv-server durakv-client
 
-durakv: $(CORE) src/durakv.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+durakv: $(CORE) $(ENCSRC) src/durakv.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 # --- network/IPC binaries (AF_UNIX) --------------------------------------
-durakv-server: $(CORE) $(NET) $(SEC) src/server.c
+durakv-server: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 durakv-client: $(NET) src/client.c
@@ -33,7 +34,7 @@ durakv-client: $(NET) src/client.c
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
        demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue \
-       file_demo demo_crypto demo_audit demo_auth test_secure
+       file_demo demo_crypto demo_audit demo_auth test_secure demo_encrypt
 
 test_storage: $(CORE) tests/test_storage.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -48,10 +49,10 @@ test_belady: $(CORE) tests/test_belady.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- network/IPC tests ---------------------------------------------------
-test_ipc: $(CORE) $(NET) $(SEC) src/server.c tests/test_ipc.c
+test_ipc: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c tests/test_ipc.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
-test_secure: $(CORE) $(NET) $(SEC) src/server.c tests/test_secure.c
+test_secure: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c tests/test_secure.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -DDURAKV_SERVER_NO_MAIN -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 demo_mqueue: tests/demo_mqueue.c
@@ -73,6 +74,9 @@ demo_audit: src/audit.c tests/demo_audit.c
 
 demo_auth: src/crypto.c src/auth.c src/permissions.c tests/demo_auth.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(SODIUM_LIBS)
+
+demo_encrypt: $(CORE) $(ENCSRC) tests/demo_encrypt.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 # --- concurrency demos ---------------------------------------------------
 demo_race: $(CORE) tests/demo_race.c
@@ -104,6 +108,7 @@ test: tests
 	@echo "== demo_audit =="        && ./demo_audit
 	@echo "== demo_auth =="         && ./demo_auth
 	@echo "== test_secure =="       && ./test_secure
+	@echo "== demo_encrypt =="      && ./demo_encrypt
 
 crashtest: durakv
 	./scripts/crashtest.sh
@@ -115,7 +120,7 @@ clean:
 	rm -f durakv durakv-server durakv-client
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady
 	rm -f mem_demo demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
-	rm -f file_demo demo_crypto demo_audit demo_auth test_secure
+	rm -f file_demo demo_crypto demo_audit demo_auth test_secure demo_encrypt
 	rm -f *.audit
 	rm -f *.db *.log *.sock /tmp/durakv_*.db /tmp/durakv_*.log /tmp/durakv_*.snap /tmp/durakv_*.sock
 	rm -rf *.dSYM
