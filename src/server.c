@@ -281,7 +281,9 @@ int main(int argc, char **argv)
     size_t frames = fenv ? (size_t)strtoul(fenv, NULL, 10) : 64;
     PolicyKind pol = (penv && strcmp(penv, "fifo") == 0) ? POLICY_FIFO : POLICY_LRU;
 
-    DB *db = db_open_ex(data, wal, frames ? frames : 64, pol);
+    const char *pw = getenv("DURAKV_PASSWORD");
+    DB *db = pw ? db_open_secure(data, wal, frames ? frames : 64, pol, pw)
+                : db_open_ex(data, wal, frames ? frames : 64, pol);
     if (!db) { fprintf(stderr, "failed to open store\n"); return 1; }
 
     int rc = server_run(sock, db, workers);

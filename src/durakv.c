@@ -134,7 +134,10 @@ int main(int argc, char **argv)
     if (frames == 0) frames = 64;
     PolicyKind policy = (penv && strcmp(penv, "fifo") == 0) ? POLICY_FIFO : POLICY_LRU;
 
-    DB *db = db_open_ex(argv[1], argv[2], frames, policy);
+    /* DURAKV_PASSWORD => encryption at rest */
+    const char *pw = getenv("DURAKV_PASSWORD");
+    DB *db = pw ? db_open_secure(argv[1], argv[2], frames, policy, pw)
+                : db_open_ex(argv[1], argv[2], frames, policy);
     if (!db) { fprintf(stderr, "failed to open store\n"); return 1; }
 
     if (argc >= 5 && strcmp(argv[3], "stress") == 0) {
