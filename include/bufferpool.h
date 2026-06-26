@@ -34,6 +34,14 @@ typedef struct {
 BufferPool *bp_create(int fd, size_t nframes, PolicyKind policy);
 void        bp_destroy(BufferPool *bp);   /* frees frames; does NOT fsync fd */
 
+/* Optional: route page I/O through caller-supplied callbacks instead of the
+ * pool's own pread/pwrite. The storage engine uses this so that a single,
+ * encryption-aware code path performs every data-file transfer. Each callback
+ * transfers one logical PAGE_SIZE page; return 0 on success. */
+typedef int (*bp_read_fn)(void *ctx, uint64_t page_id, uint8_t *out);
+typedef int (*bp_write_fn)(void *ctx, uint64_t page_id, const uint8_t *in);
+void bp_set_io(BufferPool *bp, void *ctx, bp_read_fn rd, bp_write_fn wr);
+
 /* Pin page_id into a frame and return its PAGE_SIZE buffer (NULL if every
  * frame is pinned). Modify it in place, then bp_unpin with dirty=1. */
 uint8_t    *bp_pin(BufferPool *bp, uint64_t page_id);

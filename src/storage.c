@@ -125,6 +125,17 @@ int page_write(DB *db, uint64_t page_id, const uint8_t *buf)
     return DK_OK;
 }
 
+/* Buffer-pool I/O callbacks: every cached read/write flows through page_read /
+ * page_write, the single place that (later) applies encryption at rest. */
+static int bp_io_read(void *ctx, uint64_t page_id, uint8_t *out)
+{
+    return page_read((DB *)ctx, page_id, out);
+}
+static int bp_io_write(void *ctx, uint64_t page_id, const uint8_t *in)
+{
+    return page_write((DB *)ctx, page_id, in);
+}
+
 /* ====================================================================== */
 /* Key directory (chained hash map)                                       */
 /* ====================================================================== */
@@ -487,8 +498,10 @@ DB *db_open_ex(const char *data_path, const char *wal_path,
     rebuild_index(db);           /* directory reflects the recovered pages   */
 
     /* the buffer pool is created last: recovery and rebuild use direct page
-     * I/O, so the pool starts cold and every later access flows through it. */
+     * I/O, so the pool starts cold and every later access flows through it.
+     * Route its I/O through page_read/page_write (the encryption choke point). */
     db->bp = bp_create(db->data_fd, nframes, policy);
+    bp_set_io(db->bp, db, bp_io_read, bp_io_write);
 
     return db;
 }

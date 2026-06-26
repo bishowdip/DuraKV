@@ -27,6 +27,10 @@ struct BufferPool {
     Replacer  *repl;
     BPStats    st;
     pthread_mutex_t mtx;   /* protects frame table, replacer, stats */
+
+    void        *io_ctx;   /* optional caller-supplied page I/O (else use fd) */
+    bp_read_fn   io_read;
+    bp_write_fn  io_write;
 };
 
 BufferPool *bp_create(int fd, size_t nframes, PolicyKind policy)
@@ -50,9 +54,12 @@ void bp_destroy(BufferPool *bp)
     free(bp);
 }
 
-/* Read a page from disk into a frame; pages past EOF come back empty/valid. */
+/* Read a page from disk into a frame; pages past EOF come back empty/valid.
+ * If a custom I/O callback is installed (the storage engine's encryption-aware
+ * path), use it; otherwise read the raw page directly. */
 static void load_from_disk(BufferPool *bp, uint64_t page_id, uint8_t *dst)
 {
+    if (bp->io_read) { bp->io_read(bp->io_ctx, page_id, dst); return; }
     ssize_t n = pread(bp->fd, dst, PAGE_SIZE, (off_t)page_id * PAGE_SIZE);
     if (n < (ssize_t)PAGE_SIZE) page_init(dst, page_id);
 }
@@ -60,10 +67,19 @@ static void load_from_disk(BufferPool *bp, uint64_t page_id, uint8_t *dst)
 static void writeback(BufferPool *bp, Frame *f)
 {
     if (!f->valid || !f->dirty) return;
-    ssize_t n = pwrite(bp->fd, f->data, PAGE_SIZE, (off_t)f->page_id * PAGE_SIZE);
-    if (n != (ssize_t)PAGE_SIZE) perror("bufferpool writeback");
+    if (bp->io_write) {
+        bp->io_write(bp->io_ctx, f->page_id, f->data);
+    } else {
+        ssize_t n = pwrite(bp->fd, f->data, PAGE_SIZE, (off_t)f->page_id * PAGE_SIZE);
+        if (n != (ssize_t)PAGE_SIZE) perror("bufferpool writeback");
+    }
     f->dirty = 0;
     bp->st.writebacks++;
+}
+
+void bp_set_io(BufferPool *bp, void *ctx, bp_read_fn rd, bp_write_fn wr)
+{
+    bp->io_ctx = ctx; bp->io_read = rd; bp->io_write = wr;
 }
 
 static Frame *find_resident(BufferPool *bp, uint64_t page_id, size_t *idx)
