@@ -183,6 +183,15 @@ while the core engine stays dependency-free.
 - **Audit** (`src/audit.c`) — append-only, **hash-chained** log
   (`hash = SHA-256(prev || entry)`); editing any past entry breaks the chain,
   which `audit_verify()` detects and pinpoints.
+- **Encryption at rest** (`src/encryption.c`) — opt-in via a master password
+  (`DURAKV_PASSWORD`). A key is derived (Argon2id, salt in the header) and every
+  page written to `data.db` *and* every page image logged to `wal.log` is
+  sealed. `storage.c`/`recovery.c` stay libsodium-free, calling a codec through
+  function pointers. Durability is unaffected: crashtest still passes with
+  encryption on.
+- **Server enforcement** — with `DURAKV_SECURE=1` the server requires `AUTH`
+  before data commands, checks rwx on each key's namespace, and writes every
+  attempt (allowed or DENIED) to the audit log.
 
 | Test | Proves |
 |------|--------|
@@ -190,6 +199,8 @@ while the core engine stays dependency-free.
 | `tests/demo_crypto.c` | AEAD confidentiality + integrity; Argon2id password auth |
 | `tests/demo_audit.c` | hash-chained audit detects a one-byte tamper |
 | `tests/demo_auth.c` | Argon2 login + namespace rwx allow/deny across users |
+| `tests/demo_encrypt.c` | data + WAL encrypted at rest; wrong password locked out |
+| `tests/test_secure.c` | server AUTH gate + rwx enforcement + intact audit chain |
 
 ## Tests
 
@@ -226,11 +237,11 @@ include/  storage.h wal.h recovery.h bufferpool.h replacement.h
           crypto.h auth.h permissions.h audit.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
           threadpool.c scheduler.c protocol.c server.c client.c durakv.c
-          crypto.c auth.c permissions.c audit.c
+          crypto.c auth.c permissions.c audit.c encryption.c
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
           mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
           demo_mqueue.c test_ipc.c file_demo.c
-          demo_crypto.c demo_audit.c demo_auth.c
+          demo_crypto.c demo_audit.c demo_auth.c demo_encrypt.c test_secure.c
 scripts/  crashtest.sh
 ```
 
