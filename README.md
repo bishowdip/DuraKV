@@ -25,8 +25,28 @@ configurable: `make CFLAGS="... -DPAGE_SIZE=8192"`.
 ### CLI
 
 ```bash
-./durakv data.db wal.log          # interactive command loop
+./durakv data.db wal.log          # interactive
 ```
+
+Run from a terminal, it shows a **friendly guided menu**:
+
+```
+  ____                  _  ____   __
+ |  _ \ _   _ _ __ __ _| |/ /\ \ / /
+ | | | | | | | '__/ _` | ' /  \ V /
+ | |_| | |_| | | | (_| | . \   | |
+ |____/ \__,_|_|  \__,_|_|\_\  |_|
+  crash-safe key/value store   [policy=LRU, frames=64]
+
+  What would you like to do?
+    1) Set a value          4) List all keys
+    2) Get a value          5) Show stats
+    3) Delete a key         6) Save to disk (checkpoint)
+    0) Quit
+```
+
+When input is **piped** (scripts, tests), it falls back to a raw line parser
+so automation is unaffected:
 
 | Command | Response |
 |---------|----------|
@@ -35,17 +55,17 @@ configurable: `make CFLAGS="... -DPAGE_SIZE=8192"`.
 | `del <key>` | `OK` / `NOTFOUND` |
 | `list` | one key per line, then `END` |
 | `checkpoint` | `OK` (flush pool + fsync data + WAL checkpoint marker) |
-| `stats` | buffer-pool counters (accesses/hits/faults/evictions/hit ratio) |
+| `stats` | buffer-pool counters (accesses/hits/faults/hit ratio) |
 | `quit` | exit |
-
-The buffer pool is configurable via environment variables:
-`DURAKV_FRAMES=<n>` (default 64) and `DURAKV_POLICY=fifo|lru` (default `lru`).
 
 ```
 $ printf 'set city kathmandu\nget city\nquit\n' | ./durakv data.db wal.log
 OK
 VALUE kathmandu
 ```
+
+The buffer pool is configurable via environment variables:
+`DURAKV_FRAMES=<n>` (default 64) and `DURAKV_POLICY=fifo|lru` (default `lru`).
 
 ### Client / server (IPC)
 
