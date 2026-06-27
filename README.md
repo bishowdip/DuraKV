@@ -12,9 +12,9 @@ so far is **pthreads** (in libc).
 ## Build & run
 
 ```bash
-make            # build the durakv CLI
-make tests      # build the unit tests
-make test       # run unit tests
+make            # build the durakv CLI, server and client
+make test       # run all unit tests and demos
+make demo       # guided showcase of every feature, grouped by task
 make crashtest  # the headline kill -9 durability demo
 make clean
 ```
@@ -74,8 +74,11 @@ domain socket** (`AF_UNIX`) — local IPC, deliberately *not* TCP/IP:
 
 ```bash
 ./durakv-server /tmp/durakv.sock data.db wal.log 4   # 4 worker threads
-./durakv-client /tmp/durakv.sock                     # interactive client
+./durakv-client /tmp/durakv.sock                     # friendly guided client
 ```
+
+The client shows the same menu-driven interface as the CLI (with a **Login**
+option for secure servers), and falls back to a raw loop when input is piped.
 
 Wire commands: `PING`, `SET <key> <value>`, `GET <key>`, `DEL <key>`,
 `STATS`, `QUIT`. Each message is a length-prefixed frame

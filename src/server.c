@@ -239,8 +239,14 @@ int server_run(const char *sock_path, DB *db, int nworkers)
     if (lfd < 0) { perror("unix_listen"); sec_destroy(sec); return -1; }
 
     ThreadPool *tp = threadpool_create(nworkers, 128);
-    fprintf(stderr, "durakv-server listening on %s (%d workers, %s)\n",
-            sock_path, nworkers, sec ? "SECURE" : "open");
+    fprintf(stderr,
+            "\n  DuraKV server is ready.\n"
+            "    socket : %s\n"
+            "    workers: %d\n"
+            "    mode   : %s\n"
+            "    connect with:  ./durakv-client %s\n"
+            "    (press Ctrl-C to stop)\n\n",
+            sock_path, nworkers, sec ? "SECURE (login required)" : "open", sock_path);
 
     while (!g_stop) {
         int cfd = accept(lfd, NULL, NULL);
@@ -254,7 +260,7 @@ int server_run(const char *sock_path, DB *db, int nworkers)
         threadpool_submit(tp, serve_connection, c);
     }
 
-    fprintf(stderr, "durakv-server shutting down\n");
+    fprintf(stderr, "\n  DuraKV server stopped.\n");
     close(lfd);
     unlink(sock_path);
     threadpool_shutdown(tp);
