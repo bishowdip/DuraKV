@@ -157,6 +157,46 @@
     <div id="crashOut" class="out muted">idle.</div>
   </section>
 
+  <!-- ============ SECURITY PANEL ============ -->
+  <section class="card wide">
+    <h2>Security — authentication, encryption &amp; audit <span class="badge">Task 3 · real modules</span></h2>
+    <p class="sub">
+      These run the same <code>crypto.c</code> / <code>auth.c</code> / <code>audit.c</code>
+      the secure server uses — nothing is mocked.
+    </p>
+    <div class="cols">
+      <!-- login -->
+      <div>
+        <b>1 · Authentication</b> <span class="muted" style="font-size:12px">(Argon2id)</span>
+        <label>Username</label><input id="secU" value="alice" spellcheck="false">
+        <label>Password</label><input id="secP" type="password" value="alice-secret">
+        <button onclick="secLogin()">Log in</button>
+        <div id="loginOut" class="out muted">try alice / alice-secret, then a wrong password.</div>
+      </div>
+      <!-- encryption -->
+      <div>
+        <b>2 · Encryption at rest</b> <span class="muted" style="font-size:12px">(XChaCha20-Poly1305)</span>
+        <label>Sensitive value</label>
+        <input id="secV" value="balance=9999" spellcheck="false">
+        <button onclick="secSeal()">Encrypt &amp; inspect</button>
+        <div id="sealOut" class="out muted">the value is sealed; the bytes on disk are unreadable.</div>
+      </div>
+    </div>
+    <!-- audit -->
+    <div style="margin-top:18px">
+      <b>3 · Tamper-evident audit log</b>
+      <span class="muted" style="font-size:12px">(SHA-256 hash chain)</span>
+      <div class="row">
+        <button class="ghost" onclick="secAudit('append')">Log an action</button>
+        <button onclick="secAudit('verify')">Verify chain</button>
+        <button class="danger" onclick="secAudit('tamper')">Tamper with entry #1</button>
+        <button class="ghost" onclick="secAudit('reset')">Reset</button>
+      </div>
+      <div id="auditVerdict" class="verdict"></div>
+      <div id="auditLog" class="out muted" style="font-size:11.5px">empty — log an action to start the chain.</div>
+    </div>
+  </section>
+
   <!-- ============ PAGING VISUALIZER ============ -->
   <section class="card wide">
     <h2>Paging — FIFO vs LRU &amp; Belady's anomaly <span class="badge">Task 2 · illustration</span></h2>
@@ -353,6 +393,47 @@ function pgFinish(pol){
     v.innerHTML=`LRU: ${sim3.faults} faults (3 frames) → ${sim4.faults} (4 frames). `+
       `More memory never hurts — LRU is a stack algorithm, immune to Belady's anomaly.`;
   else v.textContent=`FIFO: ${sim3.faults} vs ${sim4.faults} faults.`;
+}
+
+// ---- security panel -----------------------------------------------------
+async function secPost(path, body){
+  const r = await fetch(path,{method:'POST',body:body||''});
+  return r.json();
+}
+async function secLogin(){
+  const u=val('secU'), p=document.getElementById('secP').value;
+  const r=await secPost('/api/sec/login', u+' '+p);
+  out('loginOut', (r.ok?'✓ ':'✗ ')+r.msg, r.ok?'ok':'bad');
+}
+async function secSeal(){
+  const v=val('secV'); if(!v) return out('sealOut','enter a value','bad');
+  const r=await secPost('/api/sec/seal', v);
+  if(!r.ok) return out('sealOut',r.msg,'bad');
+  const hex=r.cipher_hex.replace(/(.{2})/g,'$1 ').trim();
+  const box=document.getElementById('sealOut'); box.className='out';
+  box.innerHTML =
+    `<span class="muted">ciphertext on disk (${r.cipher_len} bytes):</span>\n`+
+    `<span style="color:var(--accent2)">${hex}</span>\n\n`+
+    `<span class="ok">✓ confidentiality</span> — your text "${v}" does not appear in those bytes\n`+
+    `<span class="ok">✓ integrity</span> — flipping one byte makes decryption `+
+    `${r.tamper_detected?'FAIL':'—'} (tamper detected)\n`+
+    `<span class="muted">✓ correct key still recovers the plaintext: ${r.clean_open_ok}</span>`;
+}
+async function secAudit(action){
+  if(action==='append') await secPost('/api/sec/audit/append','alice SET account:1 OK');
+  if(action==='tamper') await secPost('/api/sec/audit/tamper');
+  if(action==='reset')  await secPost('/api/sec/audit/reset');
+  const v=document.getElementById('auditVerdict');
+  if(action==='verify'){
+    const r=await secPost('/api/sec/audit/verify');
+    if(r.intact){ v.className='verdict win'; v.textContent='✓ chain intact — every entry verified'; }
+    else{ v.className='verdict lose'; v.textContent=`✗ TAMPERING DETECTED — chain breaks at entry #${r.bad_seq}`; }
+  } else if(action==='tamper'){
+    v.className='verdict'; v.textContent='entry #1 was secretly altered — now click “Verify chain”.';
+  } else { v.className='verdict'; v.textContent=''; }
+  const log=await secPost('/api/sec/audit/log');
+  const box=document.getElementById('auditLog');
+  box.className='out'; box.textContent = log.log ? log.log : '(empty)';
 }
 
 // ---- boot ---------------------------------------------------------------
