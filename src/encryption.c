@@ -29,6 +29,11 @@ static void enc_free(void *ctx)
     if (ctx) { sodium_memzero(ctx, sizeof(EncCtx)); free(ctx); }
 }
 
+/* Open a database with encryption at rest. Derives the page-encryption key from
+ * the master password and the data file's salt, wires up the codec, and hands
+ * it to the generic db_open_full so every page and WAL image is sealed/unsealed
+ * transparently. The wrong password simply derives the wrong key, so pages fail
+ * AEAD verification and no data is exposed. */
 DB *db_open_secure(const char *data_path, const char *wal_path,
                    size_t nframes, PolicyKind policy, const char *password)
 {
