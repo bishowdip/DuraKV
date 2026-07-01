@@ -1,6 +1,30 @@
 /*
- * storage.c -- Page file, slotted pages, in-memory key directory, and the
- * transactional key/value API. See include/storage.h for the contract.
+ * storage.c -- the storage engine: the durable core that ties the whole system
+ * together. It owns the on-disk page file and turns it into a transactional
+ * key/value store. Four cooperating pieces live here:
+ *
+ *  1. SLOTTED PAGES. The file is an array of fixed-size pages. Each page has a
+ *     header, a slot directory growing downward from the top, and variable-
+ *     length records growing upward from the bottom; a record is addressed by
+ *     (page_id, slot). This is the standard database page layout because it lets
+ *     records vary in size and be deleted (tombstoned) without moving others.
+ *
+ *  2. KEY DIRECTORY. An in-memory chained-hash map from key -> (page_id, slot)
+ *     for O(1) average lookup. It is not persisted; it is rebuilt by scanning
+ *     the pages at open (after recovery), so it can never disagree with disk.
+ *
+ *  3. TRANSACTIONS. Every mutation is wrapped as BEGIN/UPDATE.../COMMIT in the
+ *     WAL and made durable BEFORE the data pages are touched (see commit_mods),
+ *     giving atomicity and durability. This is the point that makes DuraKV
+ *     crash-safe.
+ *
+ *  4. CONCURRENCY & CACHING. Public ops are thin wrappers that take a
+ *     pthread_rwlock (shared for reads, exclusive for writes) around lock-free
+ *     *_unlocked cores; the live read/write path flows through the write-back
+ *     buffer pool. page_read/page_write are the single choke point where
+ *     encryption at rest is (optionally) applied.
+ *
+ * See include/storage.h for the public contract and on-disk structures.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "storage.h"
@@ -19,6 +43,10 @@
 /* Slotted-page primitives                                                */
 /* ====================================================================== */
 
+/* Initialise a blank page: zero it, then set the header. free_end marks the
+ * bottom of the record area and moves DOWN as records are inserted, while the
+ * slot directory grows UP from just after the header -- the page is full when
+ * the two meet. */
 void page_init(uint8_t *page, uint64_t page_id)
 {
     memset(page, 0, PAGE_SIZE);
@@ -40,6 +68,9 @@ uint16_t page_free_space(const uint8_t *page)
     return (uint16_t)(h->free_end - dir_end);
 }
 
+/* Insert a record, returning its slot index via slot_out. Places the record at
+ * the bottom of the free area and appends a directory slot at the top. Returns
+ * -1 if it would not fit (record area and slot directory would collide). */
 int page_insert(uint8_t *page, const uint8_t *rec, uint16_t reclen, uint16_t *slot_out)
 {
     PageHeader *h = (PageHeader *)page;
@@ -59,6 +90,9 @@ int page_insert(uint8_t *page, const uint8_t *rec, uint16_t reclen, uint16_t *sl
     return 0;
 }
 
+/* Delete a record by marking its slot dead (len=0). This is a "tombstone": the
+ * record's bytes are left in place and its space is reclaimed only when the page
+ * is later compacted -- so deletes are cheap and never shift other records. */
 void page_tombstone(uint8_t *page, uint16_t slot)
 {
     PageHeader *h = (PageHeader *)page;
@@ -155,6 +189,9 @@ static int bp_io_write(void *ctx, uint64_t page_id, const uint8_t *in)
 /* Key directory (chained hash map)                                       */
 /* ====================================================================== */
 
+/* djb2 string hash: fast, simple, good enough spread for the directory. Lookup
+ * is O(1) average (uniform hashing) but O(n) worst case if many keys collide
+ * into one bucket -- acceptable here, resizable in a production system. */
 static size_t hash_key(const char *s)
 {
     size_t h = 5381;
@@ -322,6 +359,14 @@ static int commit_mods(DB *db, Mod *mods, int nmods)
     return DK_OK;
 }
 
+/*
+ * Core of SET. Builds the record, then decides where it goes: update-in-place if
+ * the key exists and its page still has room, otherwise tombstone the old copy
+ * and insert onto a page with space (allocating a new one if needed). All the
+ * touched pages are gathered as Mods and committed atomically via the WAL, so a
+ * crash mid-update never leaves a half-applied key. The directory is updated
+ * only after the commit succeeds.
+ */
 static int db_set_unlocked(DB *db, const char *key, const void *val, uint32_t vlen)
 {
     size_t klen = strlen(key);
@@ -439,6 +484,9 @@ int db_del(DB *db, const char *key)
     return rc;
 }
 
+/* Force a consistent, fully-durable state and mark it in the WAL. After a
+ * checkpoint, recovery need not replay anything before it -- which is what
+ * bounds recovery time and lets the WAL be trimmed. */
 void db_checkpoint(DB *db)
 {
     pthread_rwlock_wrlock(&db->lock);
@@ -554,6 +602,9 @@ DB *db_open_full(const char *data_path, const char *wal_path,
     db->next_txn = 1;
     pthread_rwlock_init(&db->lock, NULL);
 
+    /* ORDER MATTERS: recover first so the pages are correct, THEN build the
+     * directory from those recovered pages, THEN start caching. Doing recovery
+     * before the pool exists also guarantees the pool starts cold. */
     recovery_run(db);            /* analysis / redo / undo (direct page I/O) */
     rebuild_index(db);           /* directory reflects the recovered pages   */
 
