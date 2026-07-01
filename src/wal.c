@@ -1,6 +1,25 @@
 /*
- * wal.c -- Append-only write-ahead log with length-prefixed, crc-protected
- * records. See include/wal.h for the format.
+ * wal.c -- the write-ahead log (WAL): the source of DuraKV's crash safety.
+ *
+ * The write-ahead PRINCIPLE: before any change is applied to the data file, a
+ * record describing that change is appended here and forced to stable storage.
+ * On COMMIT the WAL is fsync'd BEFORE the client is told "OK", so every
+ * acknowledged write is already durable. Data pages themselves may still be
+ * only in RAM/OS cache at that moment -- that is safe, because recovery can
+ * reconstruct them from the log (see recovery.c). This is the write-ahead
+ * invariant: log-then-data, never data-then-log.
+ *
+ * Record layout (little-endian), all framed by a length prefix:
+ *   [u32 reclen] [u64 lsn][u64 prev_lsn][u64 txn_id][u8 type][u64 page_id]
+ *   [u32 before_len][before...][u32 after_len][after...] [u32 crc]
+ * Each record carries BOTH the before-image (for undo) and after-image (for
+ * redo) of a page, which also lets recovery repair a torn page write.
+ *
+ * Two integrity mechanisms make a half-written tail (the normal result of a
+ * crash mid-append) detectable and harmless: the length prefix bounds the read,
+ * and a CRC32 over the body is verified on scan -- a partial or corrupt final
+ * record fails one of these checks and is simply discarded, so recovery replays
+ * only whole, intact records. See include/wal.h for the public API.
  */
 #define _POSIX_C_SOURCE 200809L
 #if defined(__APPLE__)
@@ -14,8 +33,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-/* ---- CRC32 (IEEE, reflected, poly 0xEDB88420) -------------------------- */
-
+/* ---- CRC32 (IEEE 802.3, reflected, poly 0xEDB88420) -------------------- */
+/* Detects torn/corrupt records. Bit-at-a-time (no lookup table) -- the WAL is
+ * fsync-bound, so CRC speed is not the bottleneck. */
 uint32_t wal_crc32(const uint8_t *buf, size_t len)
 {
     uint32_t crc = 0xFFFFFFFFu;
@@ -35,6 +55,12 @@ static void put_u8 (uint8_t **p, uint8_t  v) { **p = v; *p += 1; }
 
 /* ---- append ------------------------------------------------------------ */
 
+/*
+ * Append one record and return its LSN (log sequence number -- a monotonically
+ * increasing id used to order records and to make redo idempotent). This only
+ * writes; durability is a separate wal_fsync() so a transaction can batch many
+ * appends behind a single flush at commit.
+ */
 uint64_t wal_append(DB *db, WalType type, uint64_t txn_id, uint64_t prev_lsn,
                     uint64_t page_id,
                     const uint8_t *before, uint32_t before_len,
@@ -94,6 +120,14 @@ static int read_full(int fd, off_t off, uint8_t *buf, size_t len)
     return 0;
 }
 
+/*
+ * Read the whole log from the start into an array of parsed records. Stops at
+ * the first sign of an incomplete/corrupt record -- a clean EOF, an impossibly
+ * small length, a short read (torn tail), or a CRC mismatch -- and returns only
+ * the records before it. This is precisely the crash-tolerance guarantee: a
+ * record half-written when the power failed is never replayed. Caller frees the
+ * result with wal_records_free().
+ */
 size_t wal_scan(DB *db, WalRecord **out)
 {
     size_t cap = 64, n = 0;
