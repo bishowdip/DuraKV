@@ -28,6 +28,11 @@
 
 #define MAX_KEY 256
 
+/* Set by SIGINT/SIGTERM to request a clean shutdown of the accept loop.
+ * `volatile sig_atomic_t` is the only type the C standard allows a handler to
+ * touch safely: volatile stops the compiler caching it, sig_atomic_t guarantees
+ * the write is atomic w.r.t. interruption. The handler does the minimum -- just
+ * flips the flag -- and the main loop notices it. */
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
@@ -103,6 +108,14 @@ typedef struct {
 
 /* ---- command dispatch -------------------------------------------------- */
 
+/*
+ * Parse and execute one text command, writing the reply into `resp` and
+ * returning its length. This is where the protocol's verbs live (PING/AUTH/
+ * SET/GET/DEL/STATS/QUIT) and, in secure mode, where the AUTH gate and per-key
+ * permission checks are enforced before any data is touched. Every recognised
+ * data command produces exactly one response line, so the protocol stays a
+ * simple request/response.
+ */
 static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
                              char *resp, size_t respcap)
 {
@@ -139,7 +152,8 @@ static size_t handle_command(Conn *c, const char *payload, uint32_t plen,
         goto done;
     }
 
-    /* everything below touches data; in secure mode it needs a session */
+    /* AUTH GATE: everything below touches data; in secure mode it is refused
+     * until this connection has logged in. */
     int is_data = (strcmp(cmd, "SET") == 0 || strcmp(cmd, "GET") == 0 ||
                    strcmp(cmd, "DEL") == 0 || strcmp(cmd, "STATS") == 0);
     if (sec && is_data && !c->authed) {
@@ -203,6 +217,14 @@ done:
 
 /* ---- per-connection session (runs on a worker thread) ------------------ */
 
+/*
+ * Handle one client for its whole lifetime. Runs as a thread-pool job, so many
+ * connections are served concurrently. Loops read-a-frame -> execute ->
+ * write-a-reply until the client QUITs, disconnects, or sends a bad frame; then
+ * closes the socket and frees its state. The req/resp buffers are `__thread`
+ * (thread-local) so each worker has its own -- sharing one static buffer across
+ * concurrent connections would be a data race.
+ */
 static void serve_connection(void *arg)
 {
     Conn *c = arg;
@@ -213,7 +235,7 @@ static void serve_connection(void *arg)
         uint32_t len = 0;
         int rc = frame_read(c->fd, req, sizeof(req), &len);
         if (rc == -2) { frame_write(c->fd, "ERR frame too large", 19); break; }
-        if (rc != 0) break;
+        if (rc != 0) break;                       /* peer closed or read error */
 
         size_t rlen = handle_command(c, req, len, resp, sizeof(resp));
         if (frame_write(c->fd, resp, (uint32_t)rlen) != 0) break;
@@ -225,8 +247,15 @@ static void serve_connection(void *arg)
 
 /* ---- accept loop ------------------------------------------------------- */
 
+/*
+ * The server main loop: set up signals, open the socket and thread pool, then
+ * accept connections forever, handing each to a worker. Returns 0 after a clean
+ * shutdown (triggered by SIGINT/SIGTERM).
+ */
 int server_run(const char *sock_path, DB *db, int nworkers)
 {
+    /* Ignore SIGPIPE so a client that vanishes mid-reply kills the write with
+     * an EPIPE error we can handle, not a signal that would kill the server. */
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa = {0};
     sa.sa_handler = on_signal;
@@ -255,6 +284,8 @@ int server_run(const char *sock_path, DB *db, int nworkers)
             if (g_stop) break;
             continue;
         }
+        /* One heap Conn per client (freed by the worker); enqueue it so a pool
+         * thread serves it while we go back to accepting the next connection. */
         Conn *c = calloc(1, sizeof(*c));
         c->fd = cfd; c->db = db; c->sec = sec;
         threadpool_submit(tp, serve_connection, c);
