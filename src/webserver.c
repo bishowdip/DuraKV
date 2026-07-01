@@ -33,6 +33,9 @@
 #define _GNU_SOURCE           /* expose strcasestr on glibc */
 #endif
 #include "protocol.h"
+#include "crypto.h"        /* real AEAD + Argon2 primitives (Task 3) */
+#include "auth.h"          /* real Argon2id login store              */
+#include "audit.h"         /* real SHA-256 hash-chained audit log    */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +61,12 @@ static const char *g_wal   = "webdemo.wal";
 static int         g_work  = 4;
 static pid_t       g_child = -1;      /* the durakv-server we supervise */
 static volatile sig_atomic_t g_stop = 0;
+
+/* ---- security-demo state (uses the REAL security modules) -------------- */
+static AuthStore  *g_auth = NULL;               /* Argon2id user store        */
+static uint8_t     g_key[CRYPTO_KEYBYTES];      /* demo encryption key        */
+static const char *g_auditpath = "web-audit.log";
+static Audit      *g_audit = NULL;              /* hash-chained audit log     */
 
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
@@ -198,6 +207,141 @@ static const char *find_body(const char *buf)
     return p ? p + 4 : "";
 }
 
+/* ---- security demo handlers (drive the real crypto/auth/audit modules) - */
+
+static void to_hex(const uint8_t *in, size_t n, char *out)
+{
+    static const char *h = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) { out[2*i] = h[in[i] >> 4]; out[2*i+1] = h[in[i] & 15]; }
+    out[2*n] = '\0';
+}
+
+/* Argon2id login: verify credentials against the real auth store. */
+static void sec_login(int fd, const char *body)
+{
+    char user[64] = {0}, pass[128] = {0};
+    sscanf(body, "%63s %127s", user, pass);
+    int sid = auth_login(g_auth, user, pass);
+    char out[128];
+    snprintf(out, sizeof(out),
+        "{\"ok\":%s,\"msg\":\"%s\"}",
+        sid > 0 ? "true" : "false",
+        sid > 0 ? "authenticated (Argon2id verified)" : "denied (bad user or password)");
+    http_json(fd, out);
+}
+
+/* AEAD seal: encrypt the value, return the ciphertext (unreadable) and prove
+ * both confidentiality (plaintext absent) and integrity (a 1-byte flip fails). */
+static void sec_seal(int fd, const char *body)
+{
+    size_t plen = strlen(body);
+    if (plen == 0) { http_json(fd, "{\"ok\":false,\"msg\":\"empty\"}"); return; }
+    if (plen > 4096) plen = 4096;
+
+    uint8_t sealed[4096 + CRYPTO_SEAL_OVERHEAD];
+    size_t  slen = crypto_seal(sealed, (const uint8_t *)body, plen, g_key);
+
+    char cipher_hex[2 * sizeof(sealed) + 1];
+    to_hex(sealed, slen, cipher_hex);
+
+    /* honest integrity demo: flip one ciphertext byte, decryption must fail */
+    uint8_t tampered[sizeof(sealed)];
+    memcpy(tampered, sealed, slen);
+    tampered[slen - 1] ^= 0x01;
+    uint8_t rec[4096];
+    long ok_open  = crypto_open(rec, sealed,   slen, g_key);   /* clean: succeeds */
+    long bad_open = crypto_open(rec, tampered, slen, g_key);   /* tampered: -1    */
+
+    char pe[4096 * 6 + 8];
+    json_escape(body, pe, sizeof(pe));
+    char out[2 * sizeof(sealed) + 4096 * 6 + 256];
+    snprintf(out, sizeof(out),
+        "{\"ok\":true,\"plaintext\":\"%s\",\"cipher_hex\":\"%s\","
+        "\"cipher_len\":%zu,\"clean_open_ok\":%s,\"tamper_detected\":%s}",
+        pe, cipher_hex, slen,
+        ok_open >= 0 ? "true" : "false",
+        bad_open < 0 ? "true" : "false");
+    http_json(fd, out);
+}
+
+/* Read a whole file into a malloc'd, NUL-terminated buffer (caller frees). */
+static char *read_file(const char *path, long *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    char *b = malloc((size_t)sz + 1);
+    size_t got = fread(b, 1, (size_t)sz, f);
+    fclose(f);
+    b[got] = '\0';
+    if (len_out) *len_out = (long)got;
+    return b;
+}
+
+/* Append one entry to the real hash-chained audit log. */
+static void sec_audit_append(int fd, const char *body)
+{
+    char user[64] = "alice", op[16] = "SET", key[64] = "account:1", res[16] = "OK";
+    sscanf(body, "%63s %15s %63s %15s", user, op, key, res);
+    audit_append(g_audit, user, op, key, res);
+    http_json(fd, "{\"ok\":true}");
+}
+
+/* Return the raw log so the browser can show the chain (hashes included). */
+static void sec_audit_log(int fd)
+{
+    long n = 0;
+    char *raw = read_file(g_auditpath, &n);
+    char esc[16384];
+    json_escape(raw ? raw : "", esc, sizeof(esc));
+    free(raw);
+    char out[16384 + 64];
+    snprintf(out, sizeof(out), "{\"ok\":true,\"log\":\"%s\"}", esc);
+    http_json(fd, out);
+}
+
+/* Verify the chain and report the first broken sequence number, if any. */
+static void sec_audit_verify(int fd)
+{
+    long bad = -1;
+    int rc = audit_verify(g_auditpath, &bad);
+    char out[96];
+    snprintf(out, sizeof(out), "{\"ok\":true,\"intact\":%s,\"bad_seq\":%ld}",
+             rc == 0 ? "true" : "false", bad);
+    http_json(fd, out);
+}
+
+/* Tamper: silently alter one hashed byte of the first entry (in place, same
+ * length) so the recomputed hash no longer matches -- exactly what audit_verify
+ * is designed to catch. */
+static void sec_audit_tamper(int fd)
+{
+    long n = 0;
+    char *raw = read_file(g_auditpath, &n);
+    if (!raw || n == 0) { free(raw); http_json(fd, "{\"ok\":false,\"msg\":\"log empty\"}"); return; }
+
+    /* offset of field 3 (user) on line 1 = char after the 2nd tab */
+    long off = -1; int tabs = 0;
+    for (long i = 0; raw[i] && raw[i] != '\n'; i++)
+        if (raw[i] == '\t') { if (++tabs == 2) { off = i + 1; break; } }
+
+    if (off < 0) { free(raw); http_json(fd, "{\"ok\":false,\"msg\":\"no entry\"}"); return; }
+
+    FILE *f = fopen(g_auditpath, "rb+");
+    if (f) { fseek(f, off, SEEK_SET); fputc(raw[off] ^ 0x01, f); fclose(f); }
+    free(raw);
+    http_json(fd, "{\"ok\":true,\"msg\":\"entry #1 secretly altered\"}");
+}
+
+/* Discard and recreate the audit log (fresh genesis). */
+static void sec_audit_reset(int fd)
+{
+    if (g_audit) audit_close(g_audit);
+    unlink(g_auditpath);
+    g_audit = audit_open(g_auditpath);
+    http_json(fd, "{\"ok\":true}");
+}
+
 static void handle_request(int fd, char *buf)
 {
     char method[8] = {0}, path[256] = {0};
@@ -229,6 +373,15 @@ static void handle_request(int fd, char *buf)
         http_json(fd, json);
         return;
     }
+
+    /* ---- security demo endpoints ---- */
+    if (strcmp(path, "/api/sec/login") == 0)        { sec_login(fd, find_body(buf)); return; }
+    if (strcmp(path, "/api/sec/seal") == 0)         { sec_seal(fd, find_body(buf)); return; }
+    if (strcmp(path, "/api/sec/audit/append") == 0) { sec_audit_append(fd, find_body(buf)); return; }
+    if (strcmp(path, "/api/sec/audit/log") == 0)    { sec_audit_log(fd); return; }
+    if (strcmp(path, "/api/sec/audit/verify") == 0) { sec_audit_verify(fd); return; }
+    if (strcmp(path, "/api/sec/audit/tamper") == 0) { sec_audit_tamper(fd); return; }
+    if (strcmp(path, "/api/sec/audit/reset") == 0)  { sec_audit_reset(fd); return; }
 
     if (strcmp(path, "/api/cmd") == 0) {
         const char *body = find_body(buf);
@@ -289,6 +442,17 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    /* Security demo: initialise the real security modules. A fixed salt keeps
+     * the demo key deterministic across restarts; the audit log starts fresh. */
+    if (crypto_init() != 0) { fprintf(stderr, "libsodium init failed\n"); return 1; }
+    g_auth = auth_create();
+    auth_register(g_auth, "alice", "alice-secret", "staff");
+    auth_register(g_auth, "bob",   "bob-secret",   "staff");
+    uint8_t salt[CRYPTO_SALTBYTES] = {0};
+    crypto_derive_key(g_key, "DuraKV demo master key", salt);
+    unlink(g_auditpath);                 /* fresh chain each run */
+    g_audit = audit_open(g_auditpath);
+
     if (spawn_child() != 0) {
         fprintf(stderr, "could not start durakv-server (is it built? run 'make')\n");
         return 1;
@@ -327,6 +491,8 @@ int main(int argc, char **argv)
     close(lfd);
     kill_child();
     unlink(g_sock);
+    if (g_audit) audit_close(g_audit);
+    if (g_auth)  auth_destroy(g_auth);
     fprintf(stderr, "\n  DuraKV web dashboard stopped.\n");
     return 0;
 }

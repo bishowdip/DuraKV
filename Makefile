@@ -32,10 +32,10 @@ durakv-client: $(NET) src/client.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- web dashboard bridge (HTTP over localhost -> AF_UNIX server) ---------
-# Innovation layer: drives the real durakv-server from a browser. Depends only
-# on the socket helpers in protocol.c; no crypto/core needed.
-durakv-web: $(NET) src/webserver.c
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+# Innovation layer: drives the real durakv-server from a browser, and runs the
+# security-panel demos through the real crypto/auth/audit modules (needs sodium).
+durakv-web: $(NET) $(SEC) src/webserver.c
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 # --- unit tests ----------------------------------------------------------
 tests: test_storage test_wal_recovery test_bufferpool test_belady mem_demo \
