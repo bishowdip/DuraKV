@@ -23,9 +23,12 @@
 #define C_CYAN  "\033[36m"
 #define C_YEL   "\033[33m"
 
+/* Holds the most recent server reply (NUL-terminated) for the caller to inspect. */
 static char g_resp[PROTO_MAX_PAYLOAD];
 
-/* send one request, receive one response (NUL-terminated). 0 ok, -1 on loss. */
+/* One round-trip of the request/response protocol: frame the request, read the
+ * framed reply, NUL-terminate it. Returns 0 on success, -1 if the connection
+ * was lost. This is the single point every command goes through. */
 static int rpc(int fd, const char *req)
 {
     if (frame_write(fd, req, (uint32_t)strlen(req)) != 0) return -1;
@@ -35,6 +38,8 @@ static int rpc(int fd, const char *req)
     return 0;
 }
 
+/* Print a prompt and read one line, stripping the trailing newline. Returns 0
+ * on EOF (e.g. Ctrl-D) so callers can exit cleanly. */
 static int ask(const char *prompt, char *buf, size_t cap)
 {
     fputs(prompt, stdout); fflush(stdout);
@@ -45,6 +50,9 @@ static int ask(const char *prompt, char *buf, size_t cap)
 
 /* ---- friendly menu (terminal) ----------------------------------------- */
 
+/* Interactive front-end: a numbered menu that turns each choice into a protocol
+ * command via rpc() and translates the raw reply into friendly, colour-coded
+ * feedback (so a non-technical user never has to type wire commands). */
 static void client_menu(int fd, const char *sock)
 {
     char choice[64], key[1024], user[128], pass[128];
@@ -136,6 +144,9 @@ static void client_menu(int fd, const char *sock)
 
 /* ---- raw loop (piped input) ------------------------------------------- */
 
+/* Non-interactive front-end: read one wire command per line from stdin and echo
+ * each reply. This keeps scripts and the automated tests (which pipe commands
+ * in) working unchanged, independent of the menu. */
 static void client_raw(int fd)
 {
     char *line = NULL; size_t cap = 0;
@@ -164,6 +175,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Choose the front-end by whether stdin is a real terminal: a person gets
+     * the guided menu, a pipe/script gets the raw line protocol. */
     if (isatty(STDIN_FILENO)) client_menu(fd, argv[1]);
     else                      client_raw(fd);
 
