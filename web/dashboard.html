@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<!--
+  dashboard.html -- the DuraKV web control room.
+
+  A single self-contained page (HTML + CSS + vanilla JS, no libraries) served by
+  durakv-web. Every button here turns into a real command sent to the real
+  durakv-server over its AF_UNIX protocol via the /api bridge -- nothing is
+  simulated, except the paging visualiser, which is a client-side illustration
+  of the SAME FIFO/LRU logic the engine uses (verified against test_belady:
+  FIFO 9->10 faults, LRU 10->8).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DuraKV — Control Room</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#2a3240;
+    --ink:#e6edf3; --dim:#8b949e; --accent:#3fb950; --accent2:#58a6ff;
+    --warn:#d29922; --danger:#f85149; --mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;line-height:1.5}
+  header{padding:18px 26px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:16px;background:var(--panel)}
+  .logo{font-weight:800;font-size:22px;letter-spacing:.5px}
+  .logo b{color:var(--accent)}
+  .tag{color:var(--dim);font-size:13px}
+  .status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:14px;
+    font-family:var(--mono)}
+  .dot{width:11px;height:11px;border-radius:50%;background:var(--dim);
+    box-shadow:0 0 0 0 rgba(0,0,0,0)}
+  .dot.up{background:var(--accent);box-shadow:0 0 10px var(--accent)}
+  .dot.down{background:var(--danger);box-shadow:0 0 10px var(--danger)}
+  main{padding:24px;display:grid;gap:22px;grid-template-columns:repeat(2,1fr);
+    max-width:1200px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:20px}
+  .card.wide{grid-column:1 / -1}
+  h2{margin:0 0 4px;font-size:16px;display:flex;align-items:center;gap:8px}
+  h2 .badge{font-size:11px;font-weight:600;color:var(--dim);border:1px solid var(--line);
+    border-radius:20px;padding:2px 9px;margin-left:auto}
+  .sub{color:var(--dim);font-size:12.5px;margin:0 0 16px}
+  label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
+  input,select{width:100%;padding:9px 11px;background:var(--bg);color:var(--ink);
+    border:1px solid var(--line);border-radius:7px;font-size:14px;font-family:var(--mono)}
+  .row{display:flex;gap:10px}.row>*{flex:1}
+  button{cursor:pointer;border:none;border-radius:7px;padding:9px 14px;font-size:13.5px;
+    font-weight:600;background:var(--accent2);color:#03121f;transition:.12s;margin-top:12px}
+  button:hover{filter:brightness(1.1)}
+  button.ghost{background:var(--panel2);color:var(--ink);border:1px solid var(--line)}
+  button.danger{background:var(--danger);color:#1a0402}
+  button.warn{background:var(--warn);color:#1a1200}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .out{font-family:var(--mono);font-size:13px;background:var(--bg);border:1px solid var(--line);
+    border-radius:7px;padding:11px 12px;margin-top:14px;min-height:20px;white-space:pre-wrap;
+    word-break:break-word}
+  .ok{color:var(--accent)} .bad{color:var(--danger)} .muted{color:var(--dim)}
+  .keys{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+  .chip{font-family:var(--mono);font-size:12px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:6px;padding:3px 9px}
+  /* crash theatre */
+  .stage{display:flex;gap:10px;margin-top:14px}
+  .step{flex:1;text-align:center;font-size:11.5px;color:var(--dim);padding:10px 6px;
+    border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+  .step.active{border-color:var(--accent2);color:var(--ink)}
+  .step.done{border-color:var(--accent);color:var(--accent)}
+  .step .n{display:block;font-size:18px;margin-bottom:3px}
+  .verdict{margin-top:16px;font-size:15px;font-weight:700;text-align:center;
+    padding:12px;border-radius:8px;min-height:20px}
+  .verdict.win{background:rgba(63,185,80,.12);color:var(--accent);border:1px solid var(--accent)}
+  .verdict.lose{background:rgba(248,81,73,.12);color:var(--danger);border:1px solid var(--danger)}
+  /* stats */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:8px}
+  .stat{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;text-align:center}
+  .stat .v{font-size:22px;font-weight:700;font-family:var(--mono)}
+  .stat .l{font-size:11px;color:var(--dim);margin-top:2px}
+  /* paging */
+  .pg-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+  .pg-controls button{margin-top:0}
+  .refstr{display:flex;gap:5px;flex-wrap:wrap;margin:10px 0}
+  .ref{width:26px;height:26px;display:flex;align-items:center;justify-content:center;
+    border:1px solid var(--line);border-radius:5px;font-family:var(--mono);font-size:13px}
+  .ref.cur{border-color:var(--accent2);background:rgba(88,166,255,.15)}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:10px}
+  .frames{display:flex;gap:6px;margin-top:8px}
+  .frame{width:38px;height:38px;display:flex;align-items:center;justify-content:center;
+    border:1px solid var(--line);border-radius:6px;font-family:var(--mono);font-size:15px;
+    background:var(--bg);transition:.15s}
+  .frame.hit{border-color:var(--accent);background:rgba(63,185,80,.15)}
+  .frame.fault{border-color:var(--danger);background:rgba(248,81,73,.15)}
+  .pill{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:6px}
+  .anomaly{color:var(--warn);font-weight:700}
+  footer{color:var(--dim);font-size:12px;text-align:center;padding:20px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Dura<b>KV</b></div>
+  <div class="tag">crash-safe key/value store · live control room</div>
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">checking…</span></div>
+</header>
+
+<main>
+  <!-- ============ KV CONSOLE ============ -->
+  <section class="card">
+    <h2>Key / Value Console <span class="badge">Task 3 · real engine</span></h2>
+    <p class="sub">Every action is sent to the live server over its AF_UNIX protocol.</p>
+    <label>Key</label>
+    <input id="k" placeholder="e.g. city" spellcheck="false">
+    <label>Value <span class="muted">(for Set)</span></label>
+    <input id="v" placeholder="e.g. kathmandu" spellcheck="false">
+    <div class="row">
+      <button onclick="doSet()">Set</button>
+      <button class="ghost" onclick="doGet()">Get</button>
+      <button class="ghost" onclick="doDel()">Delete</button>
+    </div>
+    <div id="kvOut" class="out muted">ready.</div>
+    <div id="keys" class="keys"></div>
+  </section>
+
+  <!-- ============ LIVE STATS ============ -->
+  <section class="card">
+    <h2>Buffer Pool <span class="badge">Task 2 · live STATS</span></h2>
+    <p class="sub">Polled from the server's real page-cache counters every 2 s.</p>
+    <div class="stats">
+      <div class="stat"><div id="sPolicy" class="v">–</div><div class="l">policy</div></div>
+      <div class="stat"><div id="sAcc" class="v">–</div><div class="l">accesses</div></div>
+      <div class="stat"><div id="sHits" class="v">–</div><div class="l">hits</div></div>
+      <div class="stat"><div id="sRatio" class="v">–</div><div class="l">hit ratio</div></div>
+    </div>
+    <div id="statsOut" class="out muted">waiting for first sample…</div>
+  </section>
+
+  <!-- ============ CRASH THEATRE ============ -->
+  <section class="card wide">
+    <h2>Crash Theatre — durability under <code>kill&nbsp;-9</code> <span class="badge">headline demo</span></h2>
+    <p class="sub">
+      Writes 5 keys, then really <b>SIGKILLs the running server process</b>. After a
+      restart, crash recovery replays the write-ahead log and the committed data
+      comes back — proving nothing acknowledged is ever lost.
+    </p>
+    <div class="stage">
+      <div class="step" id="st1"><span class="n">1</span>write &amp; commit</div>
+      <div class="step" id="st2"><span class="n">💀</span>kill&nbsp;-9</div>
+      <div class="step" id="st3"><span class="n">♻</span>restart + recover</div>
+      <div class="step" id="st4"><span class="n">✓</span>verify survived</div>
+    </div>
+    <div class="row">
+      <button onclick="crashRun()" id="crashBtn">▶ Run the crash test</button>
+      <button class="danger" onclick="killOnly()">💀 Kill server now</button>
+      <button class="warn" onclick="restartOnly()">♻ Restart</button>
+    </div>
+    <div id="verdict" class="verdict"></div>
+    <div id="crashOut" class="out muted">idle.</div>
+  </section>
+
+  <!-- ============ PAGING VISUALIZER ============ -->
+  <section class="card wide">
+    <h2>Paging — FIFO vs LRU &amp; Belady's anomaly <span class="badge">Task 2 · illustration</span></h2>
+    <p class="sub">
+      Client-side animation of the same replacement logic the engine uses, on the
+      classic reference string. Watch FIFO fault <b>more</b> with 4 frames than 3
+      (Belady's anomaly) while LRU never does. Verified against
+      <code>test_belady</code>: FIFO 9→10, LRU 10→8.
+    </p>
+    <div class="pg-controls">
+      <label style="margin:0">policy</label>
+      <select id="pgPolicy" style="max-width:120px" onchange="pgReset()">
+        <option value="FIFO">FIFO</option>
+        <option value="LRU">LRU</option>
+      </select>
+      <button class="ghost" onclick="pgStep()">Step ▸</button>
+      <button onclick="pgPlay()">Play ▶</button>
+      <button class="ghost" onclick="pgReset()">Reset</button>
+    </div>
+    <div id="refstr" class="refstr"></div>
+    <div class="cols">
+      <div>
+        <b>3 frames</b>
+        <div id="f3" class="frames"></div>
+        <div id="p3" class="pill">faults: 0</div>
+      </div>
+      <div>
+        <b>4 frames</b>
+        <div id="f4" class="frames"></div>
+        <div id="p4" class="pill">faults: 0</div>
+      </div>
+    </div>
+    <div id="pgVerdict" class="pill" style="margin-top:12px"></div>
+  </section>
+</main>
+
+<footer>DuraKV · pure-C engine + HTTP bridge · everything above the paging panel drives the real server</footer>
+
+<script>
+// ---- API helpers --------------------------------------------------------
+async function cmd(wire){
+  const r = await fetch('/api/cmd',{method:'POST',body:wire});
+  return r.json();                       // {ok, resp}
+}
+async function api(path){ const r = await fetch(path,{method:'POST'}); return r.json(); }
+
+const knownKeys = new Set();
+function renderKeys(){
+  const box = document.getElementById('keys');
+  box.innerHTML = knownKeys.size ? '' : '<span class="muted" style="font-size:12px">no keys set this session yet</span>';
+  knownKeys.forEach(k=>{ const c=document.createElement('span'); c.className='chip'; c.textContent=k; box.appendChild(c); });
+}
+
+// ---- KV console ---------------------------------------------------------
+function out(id,msg,cls){ const e=document.getElementById(id); e.className='out '+(cls||''); e.textContent=msg; }
+
+async function doSet(){
+  const k=val('k'), v=val('v');
+  if(!k) return out('kvOut','enter a key','bad');
+  const r=await cmd(`SET ${k} ${v}`);
+  if(r.ok && r.resp==='OK'){ knownKeys.add(k); renderKeys(); out('kvOut',`✓ stored  ${k} = "${v}"`,'ok'); }
+  else out('kvOut',r.resp,'bad');
+}
+async function doGet(){
+  const k=val('k'); if(!k) return out('kvOut','enter a key','bad');
+  const r=await cmd(`GET ${k}`);
+  if(r.ok && r.resp.startsWith('OK ')) out('kvOut',`✓ ${k} = "${r.resp.slice(3)}"`,'ok');
+  else if(r.ok) out('kvOut',`— "${k}" not found`,'muted');
+  else out('kvOut',r.resp,'bad');
+}
+async function doDel(){
+  const k=val('k'); if(!k) return out('kvOut','enter a key','bad');
+  const r=await cmd(`DEL ${k}`);
+  if(r.ok && r.resp==='OK'){ knownKeys.delete(k); renderKeys(); out('kvOut',`✓ deleted "${k}"`,'ok'); }
+  else out('kvOut',`— "${k}" not found`,'muted');
+}
+function val(id){ return document.getElementById(id).value.trim(); }
+
+// ---- status + stats polling --------------------------------------------
+async function poll(){
+  try{
+    const h=await api('/api/health');
+    setStatus(h.up);
+    if(h.up){
+      const r=await cmd('STATS');
+      if(r.ok) renderStats(r.resp);
+    }
+  }catch(e){ setStatus(false); }
+}
+function setStatus(up){
+  document.getElementById('dot').className='dot '+(up?'up':'down');
+  document.getElementById('statusText').textContent=up?'server up':'server DOWN';
+}
+function renderStats(s){
+  // s = "policy=LRU frames=64 accesses=.. hits=.. hit_ratio=..%"
+  const g=(re)=>{const m=s.match(re);return m?m[1]:'–';};
+  document.getElementById('sPolicy').textContent=g(/policy=(\w+)/);
+  document.getElementById('sAcc').textContent=g(/accesses=(\d+)/);
+  document.getElementById('sHits').textContent=g(/hits=(\d+)/);
+  document.getElementById('sRatio').textContent=g(/hit_ratio=([\d.]+%)/);
+  out('statsOut',s,'muted');
+}
+
+// ---- crash theatre ------------------------------------------------------
+const DEMO=[['account:1','1000'],['account:2','2500'],['account:3','9999'],
+            ['account:4','42'],['account:5','777']];
+function stage(n,cls){ for(let i=1;i<=4;i++){const e=document.getElementById('st'+i);
+  e.className='step'+(i<n?' done':i===n?' active':'');} }
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+async function crashRun(){
+  const btn=document.getElementById('crashBtn'); btn.disabled=true;
+  document.getElementById('verdict').className='verdict';
+  document.getElementById('verdict').textContent='';
+  try{
+    stage(1); out('crashOut','writing 5 committed keys…','muted');
+    for(const [k,v] of DEMO){ await cmd(`SET ${k} ${v}`); knownKeys.add(k); }
+    renderKeys(); await sleep(500);
+
+    stage(2); out('crashOut','sending SIGKILL (kill -9) to the server process…','bad');
+    await api('/api/kill'); setStatus(false); await sleep(700);
+    const dead=await cmd('GET account:1');
+    out('crashOut','after kill →  '+dead.resp+'   (server is gone)','bad'); await sleep(700);
+
+    stage(3); out('crashOut','restarting server → crash recovery replays the WAL…','warn');
+    await api('/api/restart'); setStatus(true); await sleep(700);
+
+    stage(4); out('crashOut','reading the 5 keys back after the crash…','muted');
+    let survived=0, lines=[];
+    for(const [k,v] of DEMO){
+      const r=await cmd(`GET ${k}`);
+      const got=r.ok && r.resp.startsWith('OK ')?r.resp.slice(3):null;
+      const ok=got===v; if(ok) survived++;
+      lines.push(`${ok?'✓':'✗'} ${k} = ${got??'(lost)'}  ${ok?'':'EXPECTED '+v}`);
+    }
+    out('crashOut',lines.join('\n'), survived===DEMO.length?'ok':'bad');
+    const v=document.getElementById('verdict');
+    if(survived===DEMO.length){ v.className='verdict win';
+      v.textContent=`✓ ALL ${survived}/5 KEYS SURVIVED kill -9 — durability proven`; stage(5); }
+    else { v.className='verdict lose'; v.textContent=`✗ ${survived}/5 survived`; }
+  }finally{ btn.disabled=false; }
+}
+async function killOnly(){ await api('/api/kill'); setStatus(false); out('crashOut','server killed (kill -9). Try a Get — it will fail.','bad'); }
+async function restartOnly(){ out('crashOut','restarting…','warn'); await api('/api/restart'); setStatus(true); out('crashOut','server restarted; recovery ran on open.','ok'); }
+
+// ---- paging visualizer (client-side illustration) -----------------------
+const REF=[1,2,3,4,1,2,5,1,2,3,4,5];
+let pgi=0, sim3=null, sim4=null;
+function newSim(n){ return {n,frames:new Array(n).fill(null),age:new Array(n).fill(0),faults:0,clock:0}; }
+function pgReset(){
+  pgi=0; sim3=newSim(3); sim4=newSim(4);
+  drawRef(); drawFrames('f3',sim3,'p3'); drawFrames('f4',sim4,'p4');
+  document.getElementById('pgVerdict').textContent='';
+}
+function drawRef(){
+  const box=document.getElementById('refstr'); box.innerHTML='';
+  REF.forEach((x,i)=>{const d=document.createElement('div');d.className='ref'+(i===pgi?' cur':'');d.textContent=x;box.appendChild(d);});
+}
+function drawFrames(id,sim,pid,flash){
+  const box=document.getElementById(id); box.innerHTML='';
+  sim.frames.forEach(f=>{const d=document.createElement('div');
+    d.className='frame'+(flash&&f===flash.pg?(flash.hit?' hit':' fault'):'');
+    d.textContent=f===null?'·':f;box.appendChild(d);});
+  document.getElementById(pid).textContent='faults: '+sim.faults;
+}
+// one access under FIFO or LRU; returns {hit,pg}
+function access(sim,pg,policy){
+  sim.clock++;
+  let idx=sim.frames.indexOf(pg);
+  if(idx>=0){ if(policy==='LRU') sim.age[idx]=sim.clock; return {hit:true,pg}; }
+  sim.faults++;
+  let empty=sim.frames.indexOf(null);
+  if(empty>=0){ sim.frames[empty]=pg; sim.age[empty]=sim.clock; return {hit:false,pg}; }
+  // evict smallest age (FIFO: age=load time; LRU: age=last use)
+  let victim=0; for(let i=1;i<sim.n;i++) if(sim.age[i]<sim.age[victim]) victim=i;
+  sim.frames[victim]=pg; sim.age[victim]=sim.clock;
+  return {hit:false,pg};
+}
+function pgStep(){
+  if(pgi>=REF.length) return;
+  const pol=document.getElementById('pgPolicy').value, x=REF[pgi];
+  const r3=access(sim3,x,pol), r4=access(sim4,x,pol);
+  pgi++;
+  drawRef(); drawFrames('f3',sim3,'p3',r3); drawFrames('f4',sim4,'p4',r4);
+  if(pgi>=REF.length) pgFinish(pol);
+}
+async function pgPlay(){ while(pgi<REF.length){ pgStep(); await sleep(550);} }
+function pgFinish(pol){
+  const v=document.getElementById('pgVerdict');
+  if(pol==='FIFO' && sim4.faults>sim3.faults)
+    v.innerHTML=`<span class="anomaly">⚠ Belady's anomaly:</span> FIFO faulted `+
+      `${sim3.faults} with 3 frames but ${sim4.faults} with 4 — more memory, MORE faults.`;
+  else if(pol==='LRU')
+    v.innerHTML=`LRU: ${sim3.faults} faults (3 frames) → ${sim4.faults} (4 frames). `+
+      `More memory never hurts — LRU is a stack algorithm, immune to Belady's anomaly.`;
+  else v.textContent=`FIFO: ${sim3.faults} vs ${sim4.faults} faults.`;
+}
+
+// ---- boot ---------------------------------------------------------------
+renderKeys(); pgReset(); poll(); setInterval(poll,2000);
+</script>
+</body>
+</html>
