@@ -19,7 +19,7 @@ SODIUM_LIBS   := -L$(SODIUM_PREFIX)/lib -lsodium
 
 .PHONY: all tests test demo demos crashtest crashtest_concurrent clean
 
-all: durakv durakv-server durakv-client
+all: durakv durakv-server durakv-client durakv-web
 
 durakv: $(CORE) $(ENCSRC) src/durakv.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
@@ -29,6 +29,12 @@ durakv-server: $(CORE) $(NET) $(SEC) src/encryption.c src/server.c
 	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) -o $@ $^ $(LDFLAGS) $(SODIUM_LIBS)
 
 durakv-client: $(NET) src/client.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# --- web dashboard bridge (HTTP over localhost -> AF_UNIX server) ---------
+# Innovation layer: drives the real durakv-server from a browser. Depends only
+# on the socket helpers in protocol.c; no crypto/core needed.
+durakv-web: $(NET) src/webserver.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # --- unit tests ----------------------------------------------------------
@@ -120,7 +126,7 @@ crashtest_concurrent: durakv
 	./scripts/crashtest.sh 12 400 4    # 4 worker threads per batch
 
 clean:
-	rm -f durakv durakv-server durakv-client
+	rm -f durakv durakv-server durakv-client durakv-web
 	rm -f test_storage test_wal_recovery test_bufferpool test_belady
 	rm -f mem_demo demo_race demo_deadlock demo_scheduler loadtest test_ipc demo_mqueue
 	rm -f file_demo demo_crypto demo_audit demo_auth test_secure demo_encrypt

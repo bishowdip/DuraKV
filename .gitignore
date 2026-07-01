@@ -8,6 +8,7 @@
 /durakv
 /durakv-server
 /durakv-client
+/durakv-web
 /test_storage
 /test_wal_recovery
 /test_bufferpool
