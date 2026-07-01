@@ -1,6 +1,24 @@
 /*
- * recovery.c -- Simplified ARIES crash recovery: analysis, redo, undo.
- * See include/recovery.h for the algorithm description.
+ * recovery.c -- crash recovery, a simplified form of the ARIES algorithm.
+ *
+ * Run once at startup, this brings the data file to a consistent state after a
+ * crash by replaying the WAL in three passes:
+ *
+ *   1. ANALYSIS -- scan forward from the last checkpoint to learn which
+ *      transactions COMMITTED (winners) and which were still in flight
+ *      (losers), and the highest LSN/txn ids seen.
+ *   2. REDO -- re-apply the after-image of every committed update, so all
+ *      acknowledged work is present even if its data page never reached disk.
+ *   3. UNDO -- restore the before-image of every uncommitted update, so a
+ *      partially-applied loser transaction leaves no trace ("atomicity").
+ *
+ * The crucial property is IDEMPOTENCE: redo compares each page's stored
+ * page_lsn against the record's lsn and re-applies only when page_lsn < lsn.
+ * A page already carrying that change (page_lsn >= lsn) is skipped. This makes
+ * recovery safe to crash *during* and re-run from scratch -- exactly why the
+ * crashtest can kill the process repeatedly and never lose or double-apply
+ * data. Because each record holds a full page image, redo/undo also transparently
+ * repair a torn (half-written) page. See include/recovery.h.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "recovery.h"
@@ -66,7 +84,10 @@ int recovery_run(DB *db)
         if (!committed(commit_set, ncommit, r->txn_id)) continue;
         if (!wal_image(db, r->after, r->after_len, img)) continue;   /* wrong key */
         page_read(db, r->page_id, page);
-        if (page_get_lsn(page) < r->lsn) {       /* the idempotency check */
+        /* Idempotency check: only apply if the page has not already absorbed
+         * this change. Skipping when page_lsn >= r->lsn is what lets recovery
+         * be re-run any number of times without corrupting data. */
+        if (page_get_lsn(page) < r->lsn) {
             memcpy(page, img, PAGE_SIZE);
             page_write(db, r->page_id, page);
         }
