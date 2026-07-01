@@ -4,16 +4,26 @@
 # locally and submitted separately; they must never be committed.
 # ---------------------------------------------------------------------------
 
-# build artifacts
+# build artifacts (compiled binaries live at the repo root, never tracked)
 /durakv
+/durakv-server
+/durakv-client
 /test_storage
 /test_wal_recovery
 /test_bufferpool
 /test_belady
+/test_ipc
+/test_secure
 /mem_demo
+/file_demo
 /demo_race
 /demo_deadlock
 /demo_scheduler
+/demo_mqueue
+/demo_crypto
+/demo_audit
+/demo_auth
+/demo_encrypt
 /loadtest
 *.o
 *.dSYM/
