@@ -66,6 +66,9 @@ static void run_stress(DB *db, long count, long start, long threads)
     free(args); free(th);
 }
 
+/* Raw line-command interpreter for piped/scripted input (set/get/del/list/
+ * stats/checkpoint/quit), one command per line. Kept deliberately simple and
+ * stable because crashtest.sh and the demos drive the CLI through this path. */
 static void run_interactive(DB *db)
 {
     char line[1 << 20];          /* generous: keys + values on one line */
@@ -265,6 +268,8 @@ int main(int argc, char **argv)
                 : db_open_ex(argv[1], argv[2], frames, policy);
     if (!db) { fprintf(stderr, "failed to open store\n"); return 1; }
 
+    /* Three modes: batch stress (for crashtest/load), guided menu for a human
+     * at a terminal, or the raw parser for pipes/scripts. */
     if (argc >= 5 && strcmp(argv[3], "stress") == 0) {
         long count   = strtol(argv[4], NULL, 10);
         long start   = argc >= 6 ? strtol(argv[5], NULL, 10) : 0;
