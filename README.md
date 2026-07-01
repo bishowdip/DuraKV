@@ -91,6 +91,31 @@ OK kathmandu
 BYE
 ```
 
+### Web dashboard (no terminal needed)
+
+For a click-driven demo anyone can run, `durakv-web` starts a small **pure-C
+HTTP bridge** and opens a browser control room:
+
+```bash
+make                 # builds durakv-web too
+./durakv-web         # then open http://127.0.0.1:8080
+```
+
+Browsers speak HTTP/TCP; the graded server speaks AF_UNIX. So `durakv-web`
+supervises a **real `durakv-server` child** and relays every dashboard action to
+it over the AF_UNIX protocol — nothing on the page is faked. It provides:
+
+- a **key/value console** (set/get/delete) driving the live store;
+- a **crash theatre** whose button really `SIGKILL`s the server process, then
+  restarts it so crash recovery replays the WAL and the committed data returns;
+- live **buffer-pool stats** polled from the server;
+- a **FIFO vs LRU paging visualiser** that animates Belady's anomaly (a
+  client-side illustration of the same logic, matching `test_belady`).
+
+Run it from the project root so it can find `web/dashboard.html`. The web bridge
+is an *innovation layer*; the assessed client-server application is still the
+AF_UNIX `durakv-server`/`durakv-client` pair above.
+
 ## How durability works
 
 Three concepts carry Phase 1:
@@ -260,7 +285,8 @@ include/  storage.h wal.h recovery.h bufferpool.h replacement.h
           crypto.h auth.h permissions.h audit.h
 src/      storage.c wal.c recovery.c bufferpool.c replacement.c
           threadpool.c scheduler.c protocol.c server.c client.c durakv.c
-          crypto.c auth.c permissions.c audit.c encryption.c
+          crypto.c auth.c permissions.c audit.c encryption.c webserver.c
+web/      dashboard.html                 (browser control room)
 tests/    test_storage.c test_wal_recovery.c test_bufferpool.c test_belady.c
           mem_demo.c demo_race.c demo_deadlock.c demo_scheduler.c loadtest.c
           demo_mqueue.c test_ipc.c file_demo.c

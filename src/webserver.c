@@ -308,11 +308,11 @@ int main(int argc, char **argv)
 
     fprintf(stderr,
         "\n  DuraKV web dashboard is ready.\n"
-        "    open:   http://localhost:%d\n"
+        "    open:   http://127.0.0.1:%d   (or http://localhost:%d)\n"
         "    engine: durakv-server (AF_UNIX %s), %d workers\n"
         "    files:  %s / %s\n"
         "    (press Ctrl-C to stop)\n\n",
-        port, g_sock, g_work, g_data, g_wal);
+        port, port, g_sock, g_work, g_data, g_wal);
 
     char *buf = malloc(HTTP_BUF);
     while (!g_stop) {
